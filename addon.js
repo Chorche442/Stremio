@@ -447,25 +447,33 @@ builder.defineStreamHandler(async ({ type, id, name, episode, year }) => {
 
   // Process each result and get the stream URL
   for (const result of limitedResults) {
-    if (!result.id || !result.fileHash) {
-      console.warn("Skipping result due to missing id or fileHash:", result);
-      continue;
-    }
-    try {
-      const streamInfo = await getStreamUrl(result.id, result.fileHash);
-      if (Array.isArray(streamInfo) && streamInfo.length > 0) {
-        for (const s of streamInfo) {
-          streams.push({
-            url: s.url,
-            quality: s.quality,
-            title: result.title, // add full title for Stremio display
-          });
-        }
-      }
-    } catch (error) {
-      console.error("Error processing result:", error);
-    }
+  if (!result.id || !result.fileHash) {
+    console.warn("Skipping result due to missing id or fileHash:", result);
+    continue;
   }
+  try {
+    const streamInfo = await getStreamUrl(result.id, result.fileHash);
+
+    // Výpočet velikosti a jazyka z názvu souboru
+    const sizeMB = result.size ? `${(result.size / (1024 * 1024)).toFixed(1)} MB` : '???';
+    const lang =
+      /cz|czech/i.test(result.title) ? 'CZ' :
+      /en|english/i.test(result.title) ? 'EN' : '?';
+
+    if (Array.isArray(streamInfo) && streamInfo.length > 0) {
+      for (const s of streamInfo) {
+        streams.push({
+          url: s.url,
+          quality: s.quality,
+          title: `${result.title} | ${sizeMB} | ${lang}`,
+        });
+      }
+    }
+  } catch (error) {
+    console.error("Error processing result:", error);
+  }
+}
+
   if (streams.length > 0) {
     return { streams };
   }
