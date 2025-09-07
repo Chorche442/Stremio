@@ -1,5 +1,18 @@
 const { addonBuilder } = require("stremio-addon-sdk");
 const axios = require("axios");
+const Bottleneck = require("bottleneck"); // Přidána knihovna bottleneck
+
+// Vytvoření limiteru pro omezení rychlosti požadavků na Hellspy API
+const hellspyLimiter = new Bottleneck({
+  minTime: 1000, // 1 požadavek za sekundu
+  maxConcurrent: 1, // Maximálně 1 požadavek najednou
+});
+
+// Limiter pro Wikidata API (méně přísný, protože Wikidata má vyšší limity)
+const wikidataLimiter = new Bottleneck({
+  minTime: 500, // 1 požadavek za 0.5 sekundy
+  maxConcurrent: 2, // Maximálně 2 požadavky najednou
+});
 
 // Create a new addon builder instance
 const builder = new addonBuilder({
@@ -26,17 +39,32 @@ async function searchHellspy(query) {
   }
   try {
     console.log(`Searching Hellspy API for "${query}"...`);
-    const response = await axios.get(
-      `https://api.hellspy.to/gw/search?query=${encodeURIComponent(
-        query
-      )}&offset=0&limit=64`
+    const response = await hellspyLimiter.schedule(() =>
+      axios.get(
+        `https://api.hellspy.to/gw/search?query=${encodeURIComponent(
+          query
+        )}&offset=0&limit=64`,
+        {
+          headers: {
+            Accept: "application/json, text/plain, */*",
+            "User-Agent": "axios/1.7.2", // Aktualizováno na novou verzi
+          },
+        }
+      )
     );
     const items = response.data.items || [];
     const results = items.filter((item) => item.objectType === "GWSearchVideo");
     searchCache.set(query, { results, timestamp: Date.now() });
     return results;
   } catch (error) {
-    // Handle errors gracefully
+    if (error.response && error.response.status === 429) {
+      console.error("429 Too Many Requests in searchHellspy - čekám a zkouším znovu...");
+      const retryAfter = error.response.headers["retry-after"]
+        ? parseInt(error.response.headers["retry-after"], 10) * 1000
+        : 5000; // Výchozí prodleva 5 sekund
+      await new Promise((resolve) => setTimeout(resolve, retryAfter));
+      return searchHellspy(query); // Opakování požadavku
+    }
     console.error("Hellspy API search error:", error);
     return [];
   }
@@ -52,8 +80,13 @@ async function getStreamUrl(id, fileHash) {
     }
   }
   try {
-    const response = await axios.get(
-      `https://api.hellspy.to/gw/video/${id}/${fileHash}`
+    const response = await hellspyLimiter.schedule(() =>
+      axios.get(`https://api.hellspy.to/gw/video/${id}/${fileHash}`, {
+        headers: {
+          Accept: "application/json, text/plain, */*",
+          "User-Agent": "axios/1.7.2", // Aktualizováno na novou verzi
+        },
+      })
     );
     const conversions = response.data.conversions || {};
     const streams = Object.entries(conversions).map(([quality, url]) => ({
@@ -63,6 +96,14 @@ async function getStreamUrl(id, fileHash) {
     searchCache.set(cacheKey, { url: streams, timestamp: Date.now() });
     return streams;
   } catch (error) {
+    if (error.response && error.response.status === 429) {
+      console.error("429 Too Many Requests in getStreamUrl - čekám a zkouším znovu...");
+      const retryAfter = error.response.headers["retry-after"]
+        ? parseInt(error.response.headers["retry-after"], 10) * 1000
+        : 5000; // Výchozí prodleva 5 sekund
+      await new Promise((resolve) => setTimeout(resolve, retryAfter));
+      return getStreamUrl(id, fileHash); // Opakování požadavku
+    }
     console.error("Hellspy API getStreamUrl error:", error);
     return [];
   }
@@ -93,8 +134,12 @@ async function getTitleFromWikidata(imdbId) {
     const headers = { Accept: "application/sparql-results+json" };
 
     const [czResponse, enResponse] = await Promise.all([
-      axios.get(url, { params: { query: baseQuery("cs") }, headers }),
-      axios.get(url, { params: { query: baseQuery("en") }, headers }),
+      wikidataLimiter.schedule(() =>
+        axios.get(url, { params: { query: baseQuery("cs") }, headers })
+      ),
+      wikidataLimiter.schedule(() =>
+        axios.get(url, { params: { query: baseQuery("en") }, headers })
+      ),
     ]);
 
     const czResult = czResponse.data.results.bindings[0] || {};
@@ -447,32 +492,36 @@ builder.defineStreamHandler(async ({ type, id, name, episode, year }) => {
 
   // Process each result and get the stream URL
   for (const result of limitedResults) {
-  if (!result.id || !result.fileHash) {
-    console.warn("Skipping result due to missing id or fileHash:", result);
-    continue;
-  }
-  try {
-    const streamInfo = await getStreamUrl(result.id, result.fileHash);
-
-    // Výpočet velikosti a jazyka z názvu souboru
-    const sizeMB = result.size ? `${(result.size / (1024 * 1024)).toFixed(1)} MB` : '???';
-    const lang =
-      /cz|czech/i.test(result.title) ? 'CZ' :
-      /en|english/i.test(result.title) ? 'EN' : '?';
-
-    if (Array.isArray(streamInfo) && streamInfo.length > 0) {
-      for (const s of streamInfo) {
-        streams.push({
-          url: s.url,
-          quality: s.quality,
-          title: `${result.title} | ${sizeMB} | ${lang}`,
-        });
-      }
+    if (!result.id || !result.fileHash) {
+      console.warn("Skipping result due to missing id or fileHash:", result);
+      continue;
     }
-  } catch (error) {
-    console.error("Error processing result:", error);
+    try {
+      const streamInfo = await getStreamUrl(result.id, result.fileHash);
+
+      // Výpočet velikosti a jazyka z názvu souboru
+      const sizeMB = result.size
+        ? `${(result.size / (1024 * 1024)).toFixed(1)} MB`
+        : "???";
+      const lang = /cz|czech/i.test(result.title)
+        ? "CZ"
+        : /en|english/i.test(result.title)
+        ? "EN"
+        : "?";
+
+      if (Array.isArray(streamInfo) && streamInfo.length > 0) {
+        for (const s of streamInfo) {
+          streams.push({
+            url: s.url,
+            quality: s.quality,
+            title: `${result.title} | ${sizeMB} | ${lang}`,
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Error processing result:", error);
+    }
   }
-}
 
   if (streams.length > 0) {
     return { streams };
