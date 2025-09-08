@@ -17,8 +17,7 @@
   "license": "GPL-2.0",
   "dependencies": {
     "stremio-addon-sdk": "^1.6.10",
-    "axios": "^1.7.2",
-    "bottleneck": "^2.19.5"
+    "axios": "^0.24.0"
   },
   "engines": {
     "node": ">=14.0.0"
