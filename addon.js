@@ -697,6 +697,6 @@ builder.defineStreamHandler(async ({ type, id, name, episode, year }) => {
 });
 
 module.exports = builder.getInterface();
-});
 
-module.exports = builder.getInterface();
+
+
